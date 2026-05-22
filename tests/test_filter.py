@@ -70,6 +70,12 @@ def test_filter_pattern_no_match(log_file):
     assert results == []
 
 
+def test_filter_nonexistent_file_raises():
+    """filter_lines should raise an appropriate error for a missing file."""
+    with pytest.raises((FileNotFoundError, OSError)):
+        list(filter_lines("/nonexistent/path/to/file.log"))
+
+
 def test_count_matches_all(log_file):
     assert count_matches(log_file) == len(SAMPLE_LOGS)
 
