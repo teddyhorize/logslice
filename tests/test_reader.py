@@ -86,3 +86,14 @@ def test_stream_combined_filter(log_file):
 def test_stream_no_matches(log_file):
     lines = list(stream_lines(log_file, pattern=r"CRITICAL"))
     assert lines == []
+
+
+def test_stream_empty_file():
+    """stream_lines on an empty file should yield no lines."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".log", delete=False) as fh:
+        path = fh.name
+    try:
+        lines = list(stream_lines(path))
+        assert lines == []
+    finally:
+        os.unlink(path)
