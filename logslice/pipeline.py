@@ -1,74 +1,102 @@
-"""High-level pipeline: read → filter → format → write."""
+"""High-level pipeline that wires reader → filter → dedup → format → output."""
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Optional
+from typing import Iterator, NamedTuple
 
+from logslice.deduplicator import dedup_consecutive, dedup_global, format_collapsed
 from logslice.filter import filter_lines
-from logslice.output import write_lines, write_stats
+from logslice.formatter import format_lines
+from logslice.output import write_lines
 from logslice.reader import compile_pattern, stream_lines
 from logslice.stats import collect_stats
 
 
+class _Counter:
+    """Mutable integer counter passed by reference into generators."""
+
+    def __init__(self) -> None:
+        self.value = 0
+
+
+def _counted(iterable, counter: _Counter):
+    """Yield every item from *iterable* while incrementing *counter*."""
+    for item in iterable:
+        counter.value += 1
+        yield item
+
+
+class PipelineResult(NamedTuple):
+    total_lines: int
+    matched_lines: int
+
+
 def run_pipeline(
-    path: str,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    pattern: Optional[str] = None,
+    source: str,
+    *,
+    start=None,
+    end=None,
+    pattern: str | None = None,
     fmt: str = "plain",
-    show_numbers: bool = False,
-    dest: Optional[str] = None,
-    print_stats: bool = False,
-    encoding: str = "utf-8",
-) -> dict:
+    numbers: bool = False,
+    dest: str = "-",
+    dedup: str | None = None,
+    dedup_cache: int = 10_000,
+    show_stats: bool = False,
+) -> PipelineResult:
     """Execute the full logslice pipeline.
 
-    Parameters
-    ----------
-    path:        Path to the log file.
-    start:       Inclusive lower bound for timestamp filtering.
-    end:         Inclusive upper bound for timestamp filtering.
-    pattern:     Regex pattern string to match against each line.
-    fmt:         Output format — ``"plain"`` or ``"json"``.
-    show_numbers: Prefix output lines with original line numbers.
-    dest:        Output file path; ``None`` writes to stdout.
-    print_stats: When ``True``, emit a stats summary to stderr / *dest*.
-    encoding:    File encoding (default ``"utf-8"``).
+    Args:
+        source: Path to log file (``"-"`` for stdin).
+        start: Optional start datetime for time filtering.
+        end: Optional end datetime for time filtering.
+        pattern: Optional regex pattern string.
+        fmt: Output format – ``"plain"`` or ``"json"``.
+        numbers: Prefix lines with line numbers.
+        dest: Output destination path (``"-"`` for stdout).
+        dedup: Deduplication strategy: ``None``, ``"consecutive"``, or
+            ``"global"``.
+        dedup_cache: Max cache size for global dedup.
+        show_stats: Whether to print stats after output.
 
-    Returns
-    -------
-    dict
-        Stats dictionary produced by :func:`logslice.stats.collect_stats`.
+    Returns:
+        :class:`PipelineResult` with total and matched line counts.
     """
     regex = compile_pattern(pattern)
 
-    raw_stream = stream_lines(path, encoding=encoding)
-    filtered = filter_lines(raw_stream, start=start, end=end, pattern=regex)
+    total_counter = _Counter()
+    matched_counter = _Counter()
 
-    # Materialise for stats; still lazy via generator chaining.
-    def _counted() -> list[tuple[int, str]]:
-        return list(filtered)
+    raw: Iterator[str] = stream_lines(source)
+    counted_raw = _counted(raw, total_counter)
+    filtered = filter_lines(counted_raw, start=start, end=end, pattern=regex)
+    counted_filtered = _counted(filtered, matched_counter)
 
-    matched_lines = _counted()
+    lines: Iterator[str]
+    if dedup == "consecutive":
+        lines = (
+            format_collapsed(ln, cnt)
+            for ln, cnt in dedup_consecutive(counted_filtered)
+        )
+    elif dedup == "global":
+        lines = dedup_global(counted_filtered, max_cache=dedup_cache)
+    else:
+        lines = counted_filtered
 
-    # Count total lines for stats (requires a second pass over the file).
-    total = sum(1 for _ in stream_lines(path, encoding=encoding))
+    formatted = format_lines(lines, fmt=fmt, numbers=numbers)
+    write_lines(formatted, dest=dest)
 
-    stats = collect_stats(
-        total_lines=total,
-        matched_lines=matched_lines,
-        start=start,
-        end=end,
+    result = PipelineResult(
+        total_lines=total_counter.value,
+        matched_lines=matched_counter.value,
     )
 
-    write_lines(iter(matched_lines), dest=dest, fmt=fmt, show_numbers=show_numbers)
+    if show_stats:
+        stats = collect_stats(
+            total=result.total_lines,
+            matched=result.matched_lines,
+        )
+        from logslice.output import write_stats
+        write_stats(stats, dest=dest)
 
-    if print_stats:
-        from logslice.stats import to_dict  # local import to avoid circular
-        write_stats(to_dict(stats), dest=dest)
-
-    return to_dict(stats)
-
-
-from logslice.stats import to_dict  # noqa: E402  (module-level re-export)
+    return result
