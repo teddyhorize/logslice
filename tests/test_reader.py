@@ -37,6 +37,14 @@ def test_compile_pattern_valid():
     assert p.search("2024-01-10 ERROR something")
 
 
+def test_compile_pattern_invalid_raises():
+    """An invalid regex pattern should raise re.error."""
+    import re
+
+    with pytest.raises(re.error):
+        compile_pattern(r"[unclosed")
+
+
 def test_parse_timestamp_valid():
     ts = parse_timestamp("2024-01-10 08:00:00 INFO msg", "%Y-%m-%d %H:%M:%S")
     assert ts == datetime(2024, 1, 10, 8, 0, 0)
