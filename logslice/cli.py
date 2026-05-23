@@ -1,105 +1,86 @@
 """Command-line interface for logslice."""
 
+from __future__ import annotations
+
 import argparse
 import sys
 from datetime import datetime
 from typing import Optional
 
-from logslice.reader import compile_pattern, stream_lines
-from logslice.filter import filter_lines, count_matches
-
-
-DATETIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+from logslice.pipeline import run_pipeline
+from logslice.pager import should_page, page_lines
 
 
 def parse_datetime(value: str) -> datetime:
-    """Parse a datetime string in ISO format."""
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(
-            f"Invalid datetime format: '{value}'. Expected ISO format (e.g. 2024-01-15T10:30:00)"
-        )
+    """Parse an ISO-8601-like datetime string into a datetime object."""
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise argparse.ArgumentTypeError(
+        f"Cannot parse datetime: {value!r}. "
+        "Expected format: YYYY-MM-DDTHH:MM:SS or YYYY-MM-DD."
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build the argument parser for logslice CLI."""
     parser = argparse.ArgumentParser(
         prog="logslice",
         description="Stream and filter large log files by time range or regex.",
     )
+    parser.add_argument("file", nargs="?", default="-", help="Log file path (default: stdin).")
+    parser.add_argument("--start", type=parse_datetime, default=None, metavar="DATETIME")
+    parser.add_argument("--end", type=parse_datetime, default=None, metavar="DATETIME")
+    parser.add_argument("--pattern", default=None, help="Regex pattern to filter lines.")
+    parser.add_argument("--output", "-o", default=None, help="Write output to file.")
+    parser.add_argument("--format", choices=["plain", "json"], default="plain", dest="fmt")
+    parser.add_argument("--numbers", "-n", action="store_true", help="Show line numbers.")
+    parser.add_argument("--stats", action="store_true", help="Print match statistics.")
+    parser.add_argument("--highlight", action="store_true", help="Highlight regex matches.")
     parser.add_argument(
-        "file",
-        nargs="?",
-        default="-",
-        help="Log file to read (default: stdin)",
-    )
-    parser.add_argument(
-        "--start",
-        type=parse_datetime,
-        metavar="DATETIME",
-        help="Start of time range (ISO format)",
-    )
-    parser.add_argument(
-        "--end",
-        type=parse_datetime,
-        metavar="DATETIME",
-        help="End of time range (ISO format)",
-    )
-    parser.add_argument(
-        "--pattern",
-        metavar="REGEX",
-        help="Regex pattern to filter lines",
-    )
-    parser.add_argument(
-        "--count",
+        "--pager",
         action="store_true",
-        help="Print count of matching lines instead of lines themselves",
+        default=None,
+        help="Force output through a pager (auto-detected by default).",
     )
     parser.add_argument(
-        "--ignore-case",
-        action="store_true",
-        help="Case-insensitive pattern matching",
+        "--no-pager",
+        action="store_false",
+        dest="pager",
+        help="Disable pager even when writing to a terminal.",
     )
     return parser
 
 
-def run(argv: Optional[list] = None) -> int:
-    """Entry point for the CLI. Returns exit code."""
+def run(args: argparse.Namespace) -> None:
+    """Execute the logslice pipeline with parsed arguments."""
+    use_pager = should_page(force=args.pager, dest=args.output)
+
+    result = run_pipeline(
+        source=args.file,
+        start=args.start,
+        end=args.end,
+        pattern=args.pattern,
+        fmt=args.fmt,
+        numbers=args.numbers,
+        highlight=args.highlight,
+        dest=args.output,
+        show_stats=args.stats,
+        pager=use_pager,
+    )
+    return result
+
+
+def main(argv: Optional[list[str]] = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-
     try:
-        pattern = compile_pattern(args.pattern, ignore_case=args.ignore_case)
-    except Exception as exc:
-        print(f"logslice: invalid pattern: {exc}", file=sys.stderr)
-        return 2
-
-    try:
-        lines = stream_lines(args.file)
-        filtered = filter_lines(
-            lines,
-            start=args.start,
-            end=args.end,
-            pattern=pattern,
-        )
-
-        if args.count:
-            print(count_matches(filtered))
-        else:
-            for line in filtered:
-                print(line, end="")
-    except FileNotFoundError:
-        print(f"logslice: file not found: {args.file}", file=sys.stderr)
-        return 1
+        run(args)
+    except BrokenPipeError:
+        sys.exit(0)
     except KeyboardInterrupt:
-        return 0
-
-    return 0
-
-
-def main() -> None:
-    sys.exit(run())
+        sys.exit(130)
 
 
 if __name__ == "__main__":
