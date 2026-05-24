@@ -1,6 +1,13 @@
 """logslice — Stream and filter large log files by time range or regex."""
 
-from logslice.reader import stream_lines
+from logslice.filter import filter_lines, count_matches
+from logslice.merger import merge_streams, merge_files
+from logslice.pipeline import run_pipeline
 
-__all__ = ["stream_lines"]
-__version__ = "0.1.0"
+__all__ = [
+    "filter_lines",
+    "count_matches",
+    "merge_streams",
+    "merge_files",
+    "run_pipeline",
+]
